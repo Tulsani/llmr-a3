@@ -56,7 +56,7 @@ def compute_entropy(logits) -> torch.Tensor:
 def get_response_log_probs(model,input_ids,labels,return_token_entropy) -> dict[str,torch.Tensor]:
     logits = model(input_ids).logits # (batch_size, seq_len, vocab_size)
     # log softmax
-    log_probs_all = torch.nn.functional.log_softmax(logits,num=-1)
+    log_probs_all = torch.nn.functional.log_softmax(logits,dim=-1)
     # selecting log probs of the true token label using gather
     log_probs = log_probs_all.gather(dim=-1, #along the vocab_size
                                      index = labels.unsqueeze(-1) # select the indexes using the labels => add a dimension on labels for projection
