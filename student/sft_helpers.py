@@ -68,3 +68,13 @@ def get_response_log_probs(model,input_ids,labels,return_token_entropy) -> dict[
     if return_token_entropy:
         results["token_entropy"] = compute_entropy(logits=logits)
     return results
+
+def masked_normalize(tensor,mask,normalize_constant,dim=None) -> torch.Tensor:
+    masked_tensor = tensor*mask
+    
+    if dim is None:
+        result = masked_tensor.sum()
+    else:
+        results = masked_tensor.sum(dim=dim)
+    
+    return result/normalize_constant
