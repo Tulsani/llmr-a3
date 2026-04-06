@@ -44,7 +44,7 @@ def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer) -> dict[str,
 
 def compute_entropy(logits) -> torch.Tensor:
     # log_softmax
-    log_probs = torch.nn.functional.log_softmax(logits,dim=-1)
+    log_probs = torch.nn.functional.log_softmax(logits,dim=-1) 
     # probs
     probs = torch.exp(log_probs)
 
@@ -53,5 +53,18 @@ def compute_entropy(logits) -> torch.Tensor:
 
     return entropy
 
-def get_response_log_probs(model,input_ids,labels,return_token_entropy):
-    return
+def get_response_log_probs(model,input_ids,labels,return_token_entropy) -> dict[str,torch.Tensor]:
+    logits = model(input_ids).logits # (batch_size, seq_len, vocab_size)
+    # log softmax
+    log_probs_all = torch.nn.functional.log_softmax(logits,num=-1)
+    # selecting log probs of the true token label using gather
+    log_probs = log_probs_all.gather(dim=-1, #along the vocab_size
+                                     index = labels.unsqueeze(-1) # select the indexes using the labels => add a dimension on labels for projection
+                                    ).squeeze(1) # remove the extra element
+    results = {log_probs:"log_probs"}
+    
+    
+    # entrop calc if check
+    if return_token_entropy:
+        results["token_entropy"] = compute_entropy(logits=logits)
+    return results
