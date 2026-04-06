@@ -41,3 +41,17 @@ def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer) -> dict[str,
         "labels": input_ids_tensor[:,1:],
         "response_mask":mask_tensor[:,1:]
     }
+
+def compute_entropy(logits) -> torch.Tensor:
+    # log_softmax
+    log_probs = torch.nn.functional.log_softmax(logits,dim=-1)
+    # probs
+    probs = torch.exp(log_probs)
+
+    # entropy
+    entropy = -(probs * log_probs).sum(dim=-1)
+
+    return entropy
+
+def get_response_log_probs(model,input_ids,labels,return_token_entropy):
+    return
