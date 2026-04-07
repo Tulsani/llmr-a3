@@ -81,11 +81,13 @@ def masked_normalize(tensor,mask,normalize_constant,dim=None) -> torch.Tensor:
 
 def sft_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,normalize_constant=1.0):
     
+    batch_size = policy_log_probs.shape[0]
+
     # get the mask log prob 
     masked_logprob_sum = masked_normalize(policy_log_probs,response_mask,normalize_constant=normalize_constant)
 
     #loss nll
-    loss = -masked_logprob_sum
+    loss = -masked_logprob_sum / batch_size
     
     #gradient accumulation
     loss_scaled = loss / gradient_accumulation_steps
