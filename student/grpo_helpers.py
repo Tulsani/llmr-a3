@@ -45,13 +45,39 @@ def compute_group_normalized_rewards(reward_fn,
 
 def compute_naive_policy_gradient_loss(raw_rewards_or_advantages,
                                        policy_log_probs):
-    return
+    loss = -raw_rewards_or_advantages * policy_log_probs
+
+    return loss
 
 def compute_grpo_clip_loss(advantages,
                            policy_log_probs,
                            old_log_probs,
                            cliprange):
-    return
+    # compute prob ratio
+    log_ratio = policy_log_probs - old_log_probs
+    ratio = torch.exp(log_ratio)
+
+    # objective
+    unclipped = ratio * advantages
+
+    # cipped
+    clipped = torch.clamp(ratio, 1- cliprange,1+cliprange) *advantages
+
+    #per token loss
+    loss = - torch.min(unclipped,clipped)
+
+    is_clipped = (clipped < unclipped).float()
+    clip_fraction = is_clipped.mean()
+
+    #meta data
+    metadata = {
+        "clip_fraction":clip_fraction,
+        "mean_ratio": ratio.mean(),
+        "mean_log_ratio": log_ratio.mean()
+    }
+
+    return loss,metadata
+
 
 def compute_policy_gradient_loss(policy_log_probs,
                                  loss_type,
@@ -59,7 +85,27 @@ def compute_policy_gradient_loss(policy_log_probs,
                                  advanatages,
                                  old_log_probs,
                                  cliprange):
-    return
+    metadata = {}
+    if loss_type == "no_baseline":
+        loss = compute_naive_policy_gradient_loss(
+            raw_rewards_or_advantages=raw_rewards,
+            policy_log_probs=policy_log_probs
+        )
+
+    elif loss_type == "reinforce_with_baseline":
+        loss = compute_naive_policy_gradient_loss(
+            raw_rewards_or_advantages=advanatages,
+            policy_log_probs=policy_log_probs
+        )
+    elif loss_type == "grpo_clip":
+        loss,metadata = compute_grpo_clip_loss(
+            advantages=advanatages,
+            policy_log_probs=policy_log_probs,
+            old_log_probs=old_log_probs,
+            cliprange=cliprange
+        )
+    
+    return loss,metadata
 
 
 def mask_mean(tensor,mask,dim):
