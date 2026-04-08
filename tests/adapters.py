@@ -263,6 +263,7 @@ def run_grpo_microbatch_train_step(
                                        gradient_accumulation_steps=gradient_accumulation_steps,
                                        loss_type=loss_type,
                                        raw_rewards=raw_rewards,
+                                       advantages=advantages,
                                        old_log_probs=old_log_probs,
                                        cliprange=cliprange)
 
