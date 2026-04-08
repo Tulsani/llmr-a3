@@ -115,9 +115,9 @@ def mask_mean(tensor,mask,dim):
 
     if dim is None:
         # mean
-        return mask_mean.sum()/ mask.sum()
+        return masked_tensor.sum()/ mask.sum()
     else:
-        return mask_mean.sum(dim=dim) / mask.sum(dim=dim)
+        return masked_tensor.sum(dim=dim) / mask.sum(dim=dim)
 
 def grpo_microsbatch_train_step(policy_log_probs,
                                 response_mask,
