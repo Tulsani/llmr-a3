@@ -30,7 +30,7 @@ def compute_group_normalized_rewards(reward_fn,
         advantage_across_group = (grouped - group_mean.unsqueeze(-1)) / (std_across_group.unsqueeze(-1)+advantage_eps)
     else:
 
-        advantage_across_group = raw_rewards - group_mean.unsqueeze(-1)
+        advantage_across_group = grouped - group_mean.unsqueeze(-1)
     
     advantages = advantage_across_group.reshape(rollout_batch_size)
 
