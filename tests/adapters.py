@@ -8,6 +8,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 from student.sft_helpers import tokenize_prompt_and_output,compute_entropy,get_response_log_probs,masked_normalize,sft_microbatch_train_step
+from student.grpo_helpers import compute_group_normalized_rewards
 
 def run_tokenize_prompt_and_output(
     prompt_strs: list[str],
@@ -77,7 +78,12 @@ def run_compute_group_normalized_rewards(
                 You may choose what you wish to log here
                 (some statistics of the rewards, etc.).
     """
-    raise NotImplementedError
+    return compute_group_normalized_rewards(reward_fn=reward_fn,
+                                            rollout_responses=rollout_responses,
+                                            repeated_ground_truths=repeated_ground_truths,
+                                            group_size=group_size,
+                                            advantage_eps=advantage_eps,
+                                            normalize_by_std=normalize_by_std)
 
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
