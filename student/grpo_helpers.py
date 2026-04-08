@@ -119,7 +119,7 @@ def mask_mean(tensor,mask,dim):
     else:
         return masked_tensor.sum(dim=dim) / mask.sum(dim=dim)
 
-def grpo_microsbatch_train_step(policy_log_probs,
+def grpo_microbatch_train_step(policy_log_probs,
                                 response_mask,
                                 gradient_accumulation_steps,
                                 loss_type,
