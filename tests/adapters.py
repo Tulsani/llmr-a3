@@ -8,7 +8,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 from student.sft_helpers import tokenize_prompt_and_output,compute_entropy,get_response_log_probs,masked_normalize,sft_microbatch_train_step
-from student.grpo_helpers import compute_group_normalized_rewards,compute_naive_policy_gradient_loss,compute_grpo_clip_loss,compute_policy_gradient_loss
+from student.grpo_helpers import compute_group_normalized_rewards,compute_naive_policy_gradient_loss,compute_grpo_clip_loss,compute_policy_gradient_loss,mask_mean,grpo_microsbatch_train_step
 
 def run_tokenize_prompt_and_output(
     prompt_strs: list[str],
@@ -208,7 +208,7 @@ def run_masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = 
         torch.Tensor, the mean of the tensor along the specified
             dimension, considering only the elements with mask value 1.
     """
-    raise NotImplementedError
+    return mask_mean(tensor=tensor,mask=mask)
 
 def run_sft_microbatch_train_step(
     policy_log_probs: torch.Tensor,
@@ -258,7 +258,13 @@ def run_grpo_microbatch_train_step(
         tuple[torch.Tensor, dict[str, torch.Tensor]]: 
             the policy gradient loss and its metadata.
     """
-    raise NotImplementedError
+    return grpo_microsbatch_train_step(policy_log_probs=policy_log_probs,
+                                       response_mask=response_mask,
+                                       gradient_accumulation_steps=gradient_accumulation_steps,
+                                       loss_type=loss_type,
+                                       raw_rewards=raw_rewards,
+                                       old_log_probs=old_log_probs,
+                                       cliprange=cliprange)
 
 
 def run_masked_normalize(

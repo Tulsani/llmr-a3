@@ -109,7 +109,15 @@ def compute_policy_gradient_loss(policy_log_probs,
 
 
 def mask_mean(tensor,mask,dim):
-    return
+    
+    # marking
+    masked_tensor = tensor * mask
+
+    if dim is None:
+        # mean
+        return mask_mean.sum()/ mask.sum()
+    else:
+        return mask_mean.sum(dim=dim) / mask.sum(dim=dim)
 
 def grpo_microsbatch_train_step(policy_log_probs,
                                 response_mask,
@@ -119,4 +127,30 @@ def grpo_microsbatch_train_step(policy_log_probs,
                                 advantages,
                                 old_log_probs,
                                 cliprange):
-    return
+    
+    # per token grad loss
+    per_token_loss,metadata = compute_policy_gradient_loss(
+        policy_log_probs=policy_log_probs,
+        loss_type=loss_type,
+        raw_rewards=raw_rewards,
+        advanatages=advantages,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange
+    )
+
+    # average over reposne token
+    per_example_loss = mask_mean(per_token_loss,response_mask, dim=1)
+
+    # loss
+    loss = per_example_loss.mean()
+
+    # scale for grad
+    loss_scaled = loss/gradient_accumulation_steps
+
+    # backward
+    loss_scaled.backward()
+
+    metadata["loss"] = loss.item()
+    metadata["num_response_tokens"] = response_mask.sum().item()
+
+    return loss_scaled,metadata
