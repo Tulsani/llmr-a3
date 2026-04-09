@@ -41,9 +41,11 @@ class InstructDataset(Dataset):
         return {"prompt": prompt, "response": asst_msg}
 
 
-def collate_fn(batch, tokenizer):
+def collate_fn(batch, tokenizer, max_seq_len=1024):
     prompts   = [b["prompt"]   for b in batch]
     responses = [b["response"] for b in batch]
+    # Truncate responses to save memory
+    responses = [r[:max_seq_len] for r in responses]
     return tokenize_prompt_and_output(prompts, responses, tokenizer)
 
 ## vllm helper 
@@ -100,6 +102,8 @@ def train(args):
         trust_remote_code=True,
     ).to(device)
 
+    policy.gradient_checkpointing_enable()
+
     # init eval
     print("Initializing vLLM for evaluation...")
     llm = init_vllm(args.model, vllm_device, seed=42,
@@ -119,7 +123,7 @@ def train(args):
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=lambda b: collate_fn(b, tokenizer),
+        collate_fn=lambda b: collate_fn(b, tokenizer,args.max_seq_len),
     )
 
     # optimizer
@@ -211,6 +215,7 @@ def main():
     parser.add_argument("--eval-every",     type=int,   default=50,
                         help="Evaluate every N optimizer steps")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.4)
+    parser.add_argument("--max-seq-len", type=int, default=1024)
     args = parser.parse_args()
     train(args)
 
