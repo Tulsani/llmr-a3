@@ -198,8 +198,8 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model",      default="Qwen/Qwen2.5-Math-1.5B")
-    parser.add_argument("--data-path",  default="data/intellect_math_train_dev_test/train")
-    parser.add_argument("--output-dir", default="/scratch/at6646/sft_model")
+    parser.add_argument("--data-path",  default="data/data-distrib/intellect_math/train")
+    parser.add_argument("--output-dir", default="./sft_model")
     parser.add_argument("--max-examples",   type=int,   default=None,
                         help="Limit dataset size e.g. 128/256/512/1024 or None for full")
     parser.add_argument("--epochs",         type=int,   default=1)
