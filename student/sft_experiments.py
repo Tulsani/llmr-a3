@@ -23,7 +23,10 @@ from student.math_baseline_script import evaluate, load_prompt
 # load dataset
 class InstructDataset(Dataset):
     def __init__(self, examples, max_examples=None):
-        self.examples = examples if max_examples is None else examples[:max_examples]
+        if max_examples is not None:
+            examples = examples.select(range(min(max_examples, len(examples))))
+        # Convert to list of dicts properly
+        self.examples = [examples[i] for i in range(len(examples))]
 
     def __len__(self):
         return len(self.examples)
@@ -34,7 +37,6 @@ class InstructDataset(Dataset):
         sys_msg  = next((m["content"] for m in msgs if m["role"] == "system"), "")
         user_msg = next((m["content"] for m in msgs if m["role"] == "user"),   "")
         prompt   = (sys_msg + "\n\n" + user_msg).strip() if sys_msg else user_msg
-
         asst_msg = next((m["content"] for m in msgs if m["role"] == "assistant"), "")
         return {"prompt": prompt, "response": asst_msg}
 
