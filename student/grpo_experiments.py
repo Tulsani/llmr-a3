@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import torch
 import wandb
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -15,7 +15,7 @@ from student.grpo_helpers import (
     mask_mean
 )
 from student.sft_helpers import get_response_log_probs, tokenize_prompt_and_output
-from student.drgrpo_grader import question_only_reward_fn,r1_zero_reward_fn
+from student.drgrpo_grader import question_only_reward_fn, r1_zero_reward_fn
 
 
 def init_vllm(model_id, device, seed, gpu_memory_utilization=0.85):
@@ -35,15 +35,47 @@ def init_vllm(model_id, device, seed, gpu_memory_utilization=0.85):
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
+
 def load_policy_into_vllm_instance(policy, llm):
     state_dict = policy.state_dict()
     llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     llm_model.load_weights(state_dict.items())
 
+
 def load_countdown_prompt():
     from pathlib import Path
     path = Path(__file__).parent / "prompts" / "countdown.prompt"
     return path.read_text()
+
+
+def load_countdown_data(path):
+    """
+    Load countdown data from either a HuggingFace dataset directory or a
+    parquet file. Returns a list of dicts with 'problem' and 'answer' keys.
+    """
+    if os.path.isdir(path):
+        # Try load_from_disk first (HF arrow format)
+        try:
+            ds = load_from_disk(path)
+            return list(ds)
+        except Exception:
+            pass
+        # Fallback: look for parquet files inside the directory
+        parquet_files = [
+            os.path.join(path, f)
+            for f in os.listdir(path)
+            if f.endswith(".parquet")
+        ]
+        if parquet_files:
+            ds = load_dataset("parquet", data_files=parquet_files, split="train")
+            return list(ds)
+        raise FileNotFoundError(f"Could not load dataset from directory: {path}")
+    elif path.endswith(".parquet"):
+        ds = load_dataset("parquet", data_files=path, split="train")
+        return list(ds)
+    else:
+        raise FileNotFoundError(f"Unrecognised dataset path: {path}")
+
 
 def evaluate_countdown(llm, prompts, ground_truths, reward_fn):
     params = SamplingParams(
@@ -68,12 +100,13 @@ def evaluate_countdown(llm, prompts, ground_truths, reward_fn):
         "answer_reward": answer_reward / n,
     }
 
-def make_prompt(prompt_template,ex):
-        return prompt_template + "\n\n" + ex["problem"]
+
+def make_prompt(prompt_template, ex):
+    return prompt_template + "\n\n" + ex["problem"]
+
 
 def generate_rollouts(llm, prompts, group_size, sampling_temperature,
                       sampling_min_tokens, sampling_max_tokens):
-
     params = SamplingParams(
         temperature=sampling_temperature,
         min_tokens=sampling_min_tokens,
@@ -100,31 +133,39 @@ def grpo_train_loop(args):
     device = args.policy_device
     vllm_device = args.vllm_device
 
-    n_grpo_steps= args.n_grpo_steps
-    learning_rate = args.learning_rate
-    advantage_eps = args.advantage_eps
-    rollout_batch_size = args.rollout_batch_size
-    group_size = args.group_size
-    sampling_temperature = args.sampling_temperature
-    sampling_min_tokens = args.sampling_min_tokens
-    sampling_max_tokens = args.sampling_max_tokens
-    epochs_per_rollout_batch = args.epochs_per_rollout_batch
-    train_batch_size  = args.train_batch_size
+    n_grpo_steps                = args.n_grpo_steps
+    learning_rate               = args.learning_rate
+    advantage_eps               = args.advantage_eps
+    rollout_batch_size          = args.rollout_batch_size
+    group_size                  = args.group_size
+    sampling_temperature        = args.sampling_temperature
+    sampling_min_tokens         = args.sampling_min_tokens
+    sampling_max_tokens         = args.sampling_max_tokens
+    epochs_per_rollout_batch    = args.epochs_per_rollout_batch
+    train_batch_size            = args.train_batch_size
     gradient_accumulation_steps = args.gradient_accumulation_steps
-    loss_type = args.loss_type
-    use_std_normalization = args.use_std_normalization
-    eval_every = args.eval_every
+    loss_type                   = args.loss_type
+    use_std_normalization       = args.use_std_normalization
+    eval_every                  = args.eval_every
 
-    ## suggested sanity checks
-    assert train_batch_size % gradient_accumulation_steps == 0
-    assert rollout_batch_size % group_size == 0
-    assert train_batch_size >= group_size
+    # Sanity checks
+    assert train_batch_size % gradient_accumulation_steps == 0, (
+        f"train_batch_size ({train_batch_size}) must be divisible by "
+        f"gradient_accumulation_steps ({gradient_accumulation_steps})"
+    )
+    assert rollout_batch_size % group_size == 0, (
+        f"rollout_batch_size ({rollout_batch_size}) must be divisible by "
+        f"group_size ({group_size})"
+    )
+    assert train_batch_size >= group_size, (
+        f"train_batch_size ({train_batch_size}) must be >= group_size ({group_size})"
+    )
 
-    micro_train_batch_size       = train_batch_size // gradient_accumulation_steps
-    n_prompts_per_rollout_batch  = rollout_batch_size // group_size
-    n_microbatches_per_rollout   = rollout_batch_size // micro_train_batch_size
+    micro_train_batch_size      = train_batch_size // gradient_accumulation_steps
+    n_prompts_per_rollout_batch = rollout_batch_size // group_size
+    n_microbatches_per_rollout  = rollout_batch_size // micro_train_batch_size
 
-    ## model setup
+    # Model setup
     print("Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     policy = AutoModelForCausalLM.from_pretrained(
@@ -140,60 +181,62 @@ def grpo_train_loop(args):
         betas=(0.9, 0.95),
     )
 
-    # vllm
+    # vLLM
     print("Initializing vLLM...")
     llm = init_vllm(args.model, vllm_device, seed=42,
                     gpu_memory_utilization=args.gpu_memory_utilization)
-    
-    # dataset
+
+    # Dataset  — supports both HF arrow dirs and .parquet files
     print("Loading Countdown datasets...")
-    train_ds = load_from_disk(args.train_path)
-    val_ds   = load_from_disk(args.val_path)
+    train_data = load_countdown_data(args.train_path)
+    val_data   = load_countdown_data(args.val_path)
+    print(f"  train: {len(train_data)} examples")
+    print(f"  val:   {len(val_data)} examples")
 
     prompt_template = load_countdown_prompt()
 
-    val_prompts = [make_prompt(prompt_template,ex) for ex in val_ds]
-    val_gts     = [ex["answer"]    for ex in val_ds]
+    val_prompts = [make_prompt(prompt_template, ex) for ex in val_data]
+    val_gts     = [ex["answer"] for ex in val_data]
 
-    # reward fn
+    # Reward function
     reward_fn = r1_zero_reward_fn
 
-    #intial policy eval
+    # Initial policy eval
     eval_step = 0
     print("Initial evaluation...")
     load_policy_into_vllm_instance(policy, llm)
     eval_results = evaluate_countdown(
-        llm, val_prompts[:args.n_eval_examples], 
+        llm, val_prompts[:args.n_eval_examples],
         val_gts[:args.n_eval_examples], reward_fn
     )
     wandb.log({f"eval/{k}": v for k, v in eval_results.items()} | {"eval_step": eval_step})
     print(f"[eval 0] {eval_results}")
     eval_step += 1
 
-    ## grpo look
-    train_data = list(train_ds)
+    # GRPO loop
     train_step = 0
 
     for grpo_step in range(n_grpo_steps):
         policy.eval()
 
-        #  Sample batch of questions
+        # Sample batch of questions
         indices = torch.randint(0, len(train_data), (n_prompts_per_rollout_batch,)).tolist()
         batch   = [train_data[i] for i in indices]
-        prompts = [make_prompt(ex) for ex in batch]
-        gts     = [ex["answer"]   for ex in batch]
+        # FIX: pass prompt_template to make_prompt
+        prompts = [make_prompt(prompt_template, ex) for ex in batch]
+        gts     = [ex["answer"] for ex in batch]
 
-        # generate rollouts
+        # Generate rollouts
         load_policy_into_vllm_instance(policy, llm)
         rollout_responses = generate_rollouts(
             llm, prompts, group_size,
             sampling_temperature, sampling_min_tokens, sampling_max_tokens,
         )
 
-        # repeated ground truth
+        # Repeated ground truths (one per rollout)
         repeated_gts = [gt for gt in gts for _ in range(group_size)]
 
-        # compute rewards & advantages
+        # Compute rewards & advantages
         advantages, raw_rewards, reward_metadata = compute_group_normalized_rewards(
             reward_fn=reward_fn,
             rollout_responses=rollout_responses,
@@ -203,15 +246,15 @@ def grpo_train_loop(args):
             normalize_by_std=use_std_normalization,
         )
 
-        # log train rewards
+        # Log train rewards
         wandb.log({
-            "train/mean_reward":   reward_metadata["mean_reward"],
+            "train/mean_reward":        reward_metadata["mean_reward"],
             "train/mean_format_reward": reward_metadata.get("mean_format_reward", 0),
             "train/mean_answer_reward": reward_metadata.get("mean_answer_reward", 0),
             "train_step": train_step,
         })
 
-        # tokenize rollouts
+        # Tokenize rollouts
         repeated_prompts = [p for p in prompts for _ in range(group_size)]
         tokenized = tokenize_prompt_and_output(
             repeated_prompts, rollout_responses, tokenizer
@@ -220,10 +263,10 @@ def grpo_train_loop(args):
         labels        = tokenized["labels"].to(device)
         response_mask = tokenized["response_mask"].to(device)
 
-        # advantages
+        # Advantages: (rollout_batch_size, 1) for broadcasting
         advantages = advantages.to(device).unsqueeze(-1)
 
-        # get old log probs 
+        # Get old log probs for GRPO-Clip (off-policy only)
         old_log_probs = None
         if loss_type == "grpo_clip":
             policy.eval()
@@ -235,12 +278,11 @@ def grpo_train_loop(args):
                 )
             old_log_probs = old_out["log_probs"].detach()
 
-        # training loop
+        # Inner training loop
         policy.train()
         for epoch in range(epochs_per_rollout_batch):
             optimizer.zero_grad()
 
-            # microbatches
             for mb_idx in range(n_microbatches_per_rollout):
                 start = mb_idx * micro_train_batch_size
                 end   = start  + micro_train_batch_size
@@ -272,7 +314,7 @@ def grpo_train_loop(args):
                     cliprange=args.cliprange,
                 )
 
-            # optimizer
+            # Optimizer step after all microbatches
             grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             optimizer.step()
 
@@ -290,7 +332,7 @@ def grpo_train_loop(args):
             wandb.log(log_dict)
             train_step += 1
 
-        # periodic evaluation
+        # Periodic evaluation
         if (grpo_step + 1) % eval_every == 0:
             policy.eval()
             load_policy_into_vllm_instance(policy, llm)
@@ -302,7 +344,7 @@ def grpo_train_loop(args):
             print(f"[grpo_step {grpo_step+1}] eval: {eval_results}")
             eval_step += 1
 
-    # save
+    # Save
     print(f"Saving to {args.output_dir}...")
     os.makedirs(args.output_dir, exist_ok=True)
     policy.save_pretrained(args.output_dir)
@@ -310,25 +352,28 @@ def grpo_train_loop(args):
     wandb.finish()
     print("\nDone")
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model",           default="Qwen/Qwen2.5-Math-1.5B-Instruct")
     parser.add_argument("--train-path",      default="data/countdown/train")
     parser.add_argument("--val-path",        default="data/countdown/dev")
-    parser.add_argument("--output-dir",      default="/scratch/at6646/llmr-a3/llmr-a3/grpo_model")
+    parser.add_argument("--output-dir",      default="/scratch/at6646/llmr-a3/grpo_model")
     parser.add_argument("--policy-device",   default="cuda:1")
     parser.add_argument("--vllm-device",     default="cuda:0")
-    parser.add_argument("--n-grpo-steps",         type=int,   default=200)
-    parser.add_argument("--learning-rate",         type=float, default=1e-5)
-    parser.add_argument("--advantage-eps",         type=float, default=1e-6)
-    parser.add_argument("--rollout-batch-size",    type=int,   default=16)
-    parser.add_argument("--group-size",            type=int,   default=8)
-    parser.add_argument("--sampling-temperature",  type=float, default=0.7)
-    parser.add_argument("--sampling-min-tokens",   type=int,   default=4)
-    parser.add_argument("--sampling-max-tokens",   type=int,   default=1024)
-    parser.add_argument("--epochs-per-rollout-batch", type=int, default=1)
-    parser.add_argument("--train-batch-size",      type=int,   default=64)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=128)
+    parser.add_argument("--n-grpo-steps",              type=int,   default=200)
+    parser.add_argument("--learning-rate",             type=float, default=1e-5)
+    parser.add_argument("--advantage-eps",             type=float, default=1e-6)
+    parser.add_argument("--rollout-batch-size",        type=int,   default=16)
+    parser.add_argument("--group-size",                type=int,   default=8)
+    parser.add_argument("--sampling-temperature",      type=float, default=0.7)
+    parser.add_argument("--sampling-min-tokens",       type=int,   default=4)
+    parser.add_argument("--sampling-max-tokens",       type=int,   default=1024)
+    parser.add_argument("--epochs-per-rollout-batch",  type=int,   default=1)
+    # On-policy default: train_batch_size == rollout_batch_size
+    # gradient_accumulation_steps must divide train_batch_size
+    parser.add_argument("--train-batch-size",          type=int,   default=16)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--loss-type",   default="reinforce_with_baseline",
                         choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
     parser.add_argument("--use-std-normalization",  action="store_true", default=True)
@@ -337,7 +382,7 @@ def main():
     parser.add_argument("--n-eval-examples",        type=int,   default=200)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     args = parser.parse_args()
-    #start training
+
     print("\n========  starting training ==========")
     grpo_train_loop(args)
 
