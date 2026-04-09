@@ -88,8 +88,8 @@ def train(args):
     wandb.define_metric("eval/*",  step_metric="eval_step")
 
     # set devices
-    device = "cuda:0"
-    vllm_device = "cuda:1"
+    device = "cuda:1"
+    vllm_device = "cuda:0"
 
     print("Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -210,6 +210,7 @@ def main():
     parser.add_argument("--eval-every",     type=int,   default=50,
                         help="Evaluate every N optimizer steps")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.4)
+    parser.add_argument("--max-seq-len",default=512)
     args = parser.parse_args()
     train(args)
 
