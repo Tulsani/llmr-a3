@@ -58,8 +58,9 @@ def init_vllm(model_id, device, seed, gpu_memory_utilization=0.85):
         return LLM(
             model=model_id,
             device=device,
-            dtype=torch.float16, 
-            enable_prefix_caching=True,
+            dtype=torch.float16,
+            enable_prefix_caching=False,  #  disable this
+            enforce_eager=True,           #  add this
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
@@ -86,8 +87,8 @@ def train(args):
     wandb.define_metric("eval/*",  step_metric="eval_step")
 
     # set devices
-    device = "cuda:0"
-    vllm_device = "cuda:1"
+    device = "cuda:1"
+    vllm_device = "cuda:0"
 
     print("Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
