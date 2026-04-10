@@ -17,7 +17,6 @@ from student.grpo_helpers import (
     mask_mean,
 )
 from student.sft_helpers import get_response_log_probs, tokenize_prompt_and_output
-from student.drgrpo_grader import r1_zero_reward_fn
 
 
 def load_countdown_data(path: str) -> list[dict]:
@@ -68,20 +67,69 @@ def make_ground_truth(ex: dict) -> str:
                        "numbers": sorted(ex["numbers"])})
 
 
-def countdown_reward_fn(response: str, ground_truth: str) -> dict:
-    """
-    Wrapper around r1_zero_reward_fn. ground_truth is a JSON string
-    produced by make_ground_truth().
-    """
+def _try_evaluate(expr: str):
+    """Safely evaluate a arithmetic expression string."""
+    safe_chars = set("0123456789+-*/() .\t\n")
+    if not all(c in safe_chars for c in expr):
+        return None
     try:
-        return r1_zero_reward_fn(response, ground_truth)
+        return float(eval(expr, {"__builtins__": {}}, {}))
     except Exception:
-        has_answer = "<answer>" in response and "</answer>" in response
-        return {
-            "reward":        float(has_answer),
-            "format_reward": float(has_answer),
-            "answer_reward": 0.0,
-        }
+        return None
+
+
+def countdown_reward_fn(response: str, ground_truth: str) -> dict:
+    import re
+
+    gt = json.loads(ground_truth)
+    target  = int(gt["target"])
+    allowed = sorted(int(x) for x in gt["numbers"])
+
+    # Format check
+    if "<answer>" not in response or "</answer>" not in response:
+        return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
+
+    answer_text = response.split("<answer>", 1)[-1].split("</answer>", 1)[0].strip()
+
+    # Try each line from last to first looking for a line that evaluates to target
+    for line in reversed(answer_text.splitlines()):
+        # Strip "Step X:" prefixes
+        line = re.sub(r"^\s*Step\s*\d+\s*[:.]\s*", "", line).strip()
+        if not line:
+            continue
+
+        # If line has '=', take the LHS
+        if "=" in line:
+            lhs = line.rsplit("=", 1)[0].strip()
+        else:
+            lhs = line
+
+        result = _try_evaluate(lhs)
+        if result is not None and abs(result - target) < 1e-6:
+            # For single-line answers: also verify numbers used match allowed set
+            nums_in_lhs = sorted(int(n) for n in re.findall(r"\b\d+\b", lhs))
+            if nums_in_lhs == allowed:
+                return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
+            # For multi-step: accept if the full answer block uses exactly the right numbers
+            nums_in_block = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text)
+                                   if int(n) in allowed)
+            all_nums = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text))
+            # Check every number in allowed appears exactly once across all steps
+            from collections import Counter
+            block_counter  = Counter(int(n) for n in re.findall(r"\b\d+\b", answer_text))
+            allowed_counter = Counter(allowed)
+            if all(block_counter[k] >= v for k, v in allowed_counter.items()):
+                return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
+
+    # Also try evaluating the entire answer block as a single expression
+    single = _try_evaluate(answer_text.replace("\n", " "))
+    if single is not None and abs(single - target) < 1e-6:
+        nums_used = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text))
+        if nums_used == allowed:
+            return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
+
+    return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
+
 
 
 def init_vllm(model_id: str, device: str, seed: int,
@@ -353,6 +401,10 @@ def grpo_train_loop(args):
     wandb.finish()
     print("Done")
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
