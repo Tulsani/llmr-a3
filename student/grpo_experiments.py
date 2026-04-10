@@ -18,7 +18,6 @@ from student.grpo_helpers import (
 )
 from student.sft_helpers import get_response_log_probs, tokenize_prompt_and_output
 
-
 def load_countdown_data(path: str) -> list[dict]:
     """
     Load countdown parquet (or HF arrow dir) and normalise to
@@ -56,9 +55,11 @@ def make_prompt(prompt_template: str, ex: dict) -> str:
     target  = ex["target"]
     problem = (
         f"Using the numbers in the list {numbers}, "
-        f"create an equation that equals {target}."
+        f"create an equation that equals {target}. "
+        f"You can use basic arithmetic operations (+, -, *, /) "
+        f"and each number can only be used once."
     )
-    return prompt_template + "\n\n" + problem
+    return prompt_template.replace("{question}", problem)
 
 
 def make_ground_truth(ex: dict) -> str:
@@ -129,7 +130,6 @@ def countdown_reward_fn(response: str, ground_truth: str) -> dict:
             return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
 
     return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
-
 
 
 def init_vllm(model_id: str, device: str, seed: int,
