@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import random
+import re
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,7 +24,6 @@ def load_countdown_data(path: str) -> list[dict]:
     """
     Load countdown parquet (or HF arrow dir) and normalise to
     {'numbers': [...], 'target': int} dicts.
-    Handles the schema: cols 'nums'/'numbers' and 'target'/'answer'.
     """
     p = Path(path)
     if p.is_dir():
@@ -62,14 +63,21 @@ def make_prompt(prompt_template: str, ex: dict) -> str:
     return prompt_template.replace("{question}", problem)
 
 
+def apply_chat_template(tokenizer, prompt: str) -> str:
+    """Wrap a raw prompt string in the ChatML format the Instruct model expects."""
+    messages = [{"role": "user", "content": prompt}]
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
 def make_ground_truth(ex: dict) -> str:
-    """Serialise ground truth as JSON so reward_fn can parse it."""
-    return json.dumps({"target": ex["target"],
-                       "numbers": sorted(ex["numbers"])})
+    return json.dumps({"target": ex["target"], "numbers": sorted(ex["numbers"])})
 
 
 def _try_evaluate(expr: str):
-    """Safely evaluate a arithmetic expression string."""
     safe_chars = set("0123456789+-*/() .\t\n")
     if not all(c in safe_chars for c in expr):
         return None
@@ -80,49 +88,33 @@ def _try_evaluate(expr: str):
 
 
 def countdown_reward_fn(response: str, ground_truth: str) -> dict:
-    import re
-
-    gt = json.loads(ground_truth)
+    gt      = json.loads(ground_truth)
     target  = int(gt["target"])
     allowed = sorted(int(x) for x in gt["numbers"])
 
-    # Format check
     if "<answer>" not in response or "</answer>" not in response:
         return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
 
     answer_text = response.split("<answer>", 1)[-1].split("</answer>", 1)[0].strip()
 
-    # Try each line from last to first looking for a line that evaluates to target
     for line in reversed(answer_text.splitlines()):
-        # Strip "Step X:" prefixes
         line = re.sub(r"^\s*Step\s*\d+\s*[:.]\s*", "", line).strip()
         if not line:
             continue
-
-        # If line has '=', take the LHS
-        if "=" in line:
-            lhs = line.rsplit("=", 1)[0].strip()
-        else:
-            lhs = line
-
+        lhs = line.rsplit("=", 1)[0].strip() if "=" in line else line
         result = _try_evaluate(lhs)
         if result is not None and abs(result - target) < 1e-6:
-            # For single-line answers: also verify numbers used match allowed set
+            # Single-equation: numbers in LHS must exactly match allowed
             nums_in_lhs = sorted(int(n) for n in re.findall(r"\b\d+\b", lhs))
             if nums_in_lhs == allowed:
                 return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
-            # For multi-step: accept if the full answer block uses exactly the right numbers
-            nums_in_block = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text)
-                                   if int(n) in allowed)
-            all_nums = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text))
-            # Check every number in allowed appears exactly once across all steps
-            from collections import Counter
-            block_counter  = Counter(int(n) for n in re.findall(r"\b\d+\b", answer_text))
+            # Multi-step: all allowed numbers must appear somewhere in the block
+            block_counter   = Counter(int(n) for n in re.findall(r"\b\d+\b", answer_text))
             allowed_counter = Counter(allowed)
             if all(block_counter[k] >= v for k, v in allowed_counter.items()):
                 return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
 
-    # Also try evaluating the entire answer block as a single expression
+    # Fallback: try evaluating the whole block as one expression
     single = _try_evaluate(answer_text.replace("\n", " "))
     if single is not None and abs(single - target) < 1e-6:
         nums_used = sorted(int(n) for n in re.findall(r"\b\d+\b", answer_text))
@@ -159,12 +151,19 @@ def load_policy_into_vllm(policy, llm: LLM):
 
 
 def evaluate_countdown(llm: LLM, examples: list[dict],
-                       prompt_template: str, reward_fn) -> dict:
-    prompts       = [make_prompt(prompt_template, ex) for ex in examples]
+                       prompt_template: str, reward_fn,
+                       tokenizer=None) -> dict:
+    raw_prompts   = [make_prompt(prompt_template, ex) for ex in examples]
+    # Apply chat template so the Instruct model receives properly formatted input
+    prompts       = [apply_chat_template(tokenizer, p) for p in raw_prompts] \
+                    if tokenizer is not None else raw_prompts
     ground_truths = [make_ground_truth(ex) for ex in examples]
 
-    params  = SamplingParams(temperature=0.0, max_tokens=1024, stop=["</answer>"])
+    params  = SamplingParams(temperature=0.0, max_tokens=2048, stop=["</answer>"])
     outputs = llm.generate(prompts, params)
+
+    # Debug: print first sample output to verify format
+    print("DEBUG sample output:", repr(outputs[0].outputs[0].text[:400]))
 
     total = fmt = ans = 0.0
     for out, gt in zip(outputs, ground_truths):
@@ -204,19 +203,13 @@ def grpo_train_loop(args):
     use_std_normalization       = args.use_std_normalization
     eval_every                  = args.eval_every
 
-    # Sanity checks
-    assert train_batch_size % gradient_accumulation_steps == 0, (
-        f"train_batch_size ({train_batch_size}) must be divisible by "
-        f"gradient_accumulation_steps ({gradient_accumulation_steps})"
-    )
+    assert train_batch_size % gradient_accumulation_steps == 0
     assert rollout_batch_size % group_size == 0
     assert train_batch_size >= group_size
 
     micro_train_batch_size      = train_batch_size // gradient_accumulation_steps
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     n_microbatches_per_rollout  = rollout_batch_size // micro_train_batch_size
-
-    # normalize_constant for masked_normalize (use max_tokens as the constant)
     normalize_constant = float(sampling_max_tokens) if norm_type == "masked_normalize" else None
 
     # Model
@@ -254,7 +247,8 @@ def grpo_train_loop(args):
     eval_step = 0
     print("Initial evaluation...")
     load_policy_into_vllm(policy, llm)
-    eval_results = evaluate_countdown(llm, val_examples, prompt_template, reward_fn)
+    eval_results = evaluate_countdown(
+        llm, val_examples, prompt_template, reward_fn, tokenizer=tokenizer)
     wandb.log({f"eval/{k}": v for k, v in eval_results.items()} | {"eval_step": eval_step})
     print(f"[eval 0] {eval_results}")
     eval_step += 1
@@ -265,12 +259,14 @@ def grpo_train_loop(args):
     for grpo_step in range(n_grpo_steps):
         policy.eval()
 
-        #  Sample questions
+        # 1. Sample questions
         batch   = random.sample(train_data, n_prompts_per_rollout_batch)
-        prompts = [make_prompt(prompt_template, ex) for ex in batch]
-        gts     = [make_ground_truth(ex) for ex in batch]
+        # Build raw prompts then apply chat template for the Instruct model
+        raw_prompts = [make_prompt(prompt_template, ex) for ex in batch]
+        prompts     = [apply_chat_template(tokenizer, p) for p in raw_prompts]
+        gts         = [make_ground_truth(ex) for ex in batch]
 
-        #  Generate rollouts (n=group_size per prompt)
+        # 2. Generate rollouts
         load_policy_into_vllm(policy, llm)
         sampling_params = SamplingParams(
             temperature=sampling_temperature,
@@ -286,11 +282,11 @@ def grpo_train_loop(args):
             for completion in output.outputs
         ]
 
-        # Expand prompts/gts to match rollout_batch_size
+        # Expand to rollout_batch_size
         repeated_prompts = [p for p in prompts for _ in range(group_size)]
         repeated_gts     = [gt for gt in gts for _ in range(group_size)]
 
-        #  Rewards & advantages
+        # 3. Rewards & advantages
         advantages, raw_rewards, reward_metadata = compute_group_normalized_rewards(
             reward_fn=reward_fn,
             rollout_responses=rollout_responses,
@@ -307,18 +303,17 @@ def grpo_train_loop(args):
             "train_step": train_step,
         })
 
-        # Tokenize
+        # 4. Tokenize (chat-formatted prompts + rollout responses)
         tokenized     = tokenize_prompt_and_output(
             repeated_prompts, rollout_responses, tokenizer)
         input_ids     = tokenized["input_ids"].to(device)
         labels        = tokenized["labels"].to(device)
         response_mask = tokenized["response_mask"].to(device)
 
-        # (rollout_batch_size, 1) for broadcasting in loss functions
         adv_tensor = advantages.to(device).unsqueeze(-1)
         raw_tensor = raw_rewards.to(device).unsqueeze(-1)
 
-        #  Old log probs for grpo_clip
+        # 5. Old log probs for grpo_clip
         old_log_probs = None
         if loss_type == "grpo_clip":
             policy.eval()
@@ -327,7 +322,7 @@ def grpo_train_loop(args):
                     model=policy, input_ids=input_ids, labels=labels,
                 )["log_probs"].detach()
 
-        #  Inner training loop
+        # 6. Inner training loop
         policy.train()
         for epoch in range(epochs_per_rollout_batch):
             optimizer.zero_grad()
@@ -387,7 +382,7 @@ def grpo_train_loop(args):
             policy.eval()
             load_policy_into_vllm(policy, llm)
             eval_results = evaluate_countdown(
-                llm, val_examples, prompt_template, reward_fn)
+                llm, val_examples, prompt_template, reward_fn, tokenizer=tokenizer)
             wandb.log({f"eval/{k}": v for k, v in eval_results.items()}
                       | {"eval_step": eval_step})
             print(f"[grpo_step {grpo_step+1}] eval: {eval_results}")
