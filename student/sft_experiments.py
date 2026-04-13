@@ -177,6 +177,8 @@ def train(args):
                     "train/num_response_tokens": metadata["num_response_tokens"],
                     "train_step": train_step,
                 })
+                ## adding print statement for better outputs
+                print(f"[train step={train_step}] loss={loss.item():.4f}")
                 train_step += 1
 
             # Periodic evaluation
